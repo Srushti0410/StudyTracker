@@ -1,11 +1,20 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  ReactNode,
+} from 'react';
+import { tasksApi, ApiTask } from '../api/tasks';
 
-// Types
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 export interface Task {
-  id: number;
+  id: string;          // MongoDB _id (string)
   title: string;
   subject: string;
-  deadline: Date; // using Date object for easier calendar integration
+  deadline: Date;
   progress: number;
   status: 'pending' | 'in-progress' | 'completed';
   type: 'assignment' | 'exam' | 'project';
@@ -15,7 +24,7 @@ export interface Subject {
   id: number;
   name: string;
   code: string;
-  score: number; // Current score
+  score: number;
   grade: string;
   credits: number;
 }
@@ -23,100 +32,135 @@ export interface Subject {
 interface DataContextType {
   tasks: Task[];
   subjects: Subject[];
-  addTask: (task: Omit<Task, 'id'>) => void;
-  updateTask: (id: number, updates: Partial<Task>) => void;
+  loading: boolean;
+  error: string | null;
+  addTask: (task: Omit<Task, 'id'>) => Promise<void>;
+  updateTask: (id: string, updates: Partial<Task>) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
   updateSubjectScore: (id: number, newScore: number) => void;
   setSubjects: (subjects: Subject[]) => void;
   calculateCGPA: (customSubjects?: Subject[]) => string;
 }
 
-const DataContext = createContext<DataContextType | undefined>(undefined);
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function apiToTask(t: ApiTask): Task {
+  return {
+    id: t._id,
+    title: t.title,
+    subject: t.subject,
+    deadline: new Date(t.deadline),
+    progress: t.progress,
+    status: t.status,
+    type: t.type,
+  };
+}
+
+function gradeFromScore(score: number): string {
+  if (score >= 90) return 'O';
+  if (score >= 80) return 'A+';
+  if (score >= 70) return 'A';
+  if (score >= 60) return 'B+';
+  if (score >= 50) return 'B';
+  if (score >= 40) return 'P';
+  return 'F';
+}
+
+// ─── Initial subjects (static — not persisted to DB yet) ─────────────────────
 
 const initialSubjects: Subject[] = [
-  { id: 1, name: "Data Structures", code: "CS301", score: 85, grade: "A+", credits: 4 },
-  { id: 2, name: "Database Mgmt", code: "CS302", score: 78, grade: "A", credits: 3 },
-  { id: 3, name: "Operating Systems", code: "CS303", score: 92, grade: "O", credits: 4 },
-  { id: 4, name: "Computer Networks", code: "CS304", score: 74, grade: "B+", credits: 3 },
-  { id: 5, name: "Mathematics III", code: "MA301", score: 68, grade: "B", credits: 3 },
+  { id: 1, name: 'Data Structures', code: 'CS301', score: 85, grade: 'A+', credits: 4 },
+  { id: 2, name: 'Database Mgmt', code: 'CS302', score: 78, grade: 'A', credits: 3 },
+  { id: 3, name: 'Operating Systems', code: 'CS303', score: 92, grade: 'O', credits: 4 },
+  { id: 4, name: 'Computer Networks', code: 'CS304', score: 74, grade: 'B+', credits: 3 },
+  { id: 5, name: 'Mathematics III', code: 'MA301', score: 68, grade: 'B', credits: 3 },
 ];
 
-const initialTasks: Task[] = [
-  {
-    id: 1,
-    title: "Database Assignment",
-    subject: "Database Mgmt",
-    deadline: new Date(new Date().setDate(new Date().getDate() + 1)), // Tomorrow
-    progress: 75,
-    status: "in-progress",
-    type: 'assignment'
-  },
-  {
-    id: 2,
-    title: "OS Lab Viva",
-    subject: "Operating Systems",
-    deadline: new Date(new Date().setDate(new Date().getDate() + 3)), // In 3 days
-    progress: 30,
-    status: "pending",
-    type: 'exam'
-  },
-  {
-    id: 3,
-    title: "Data Structures Quiz",
-    subject: "Data Structures",
-    deadline: new Date(new Date().setDate(new Date().getDate() + 5)),
-    progress: 0,
-    status: "pending",
-    type: 'exam'
-  },
-];
+// ─── Context ──────────────────────────────────────────────────────────────────
+
+const DataContext = createContext<DataContextType | undefined>(undefined);
 
 export function DataProvider({ children }: { children: ReactNode }) {
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
-  const [subjects, setSubjects] = useState<Subject[]>(initialSubjects);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [subjects, setSubjectsState] = useState<Subject[]>(initialSubjects);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const addTask = (task: Omit<Task, 'id'>) => {
-    setTasks(prev => [...prev, { ...task, id: Math.max(0, ...prev.map(t => t.id)) + 1 }]);
-  };
+  // ── Fetch all tasks on mount ──────────────────────────────────────────────
+  useEffect(() => {
+    tasksApi
+      .getAll()
+      .then((data) => setTasks(data.map(apiToTask)))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
 
-  const updateTask = (id: number, updates: Partial<Task>) => {
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
-  };
+  // ── CRUD ─────────────────────────────────────────────────────────────────
 
-  const updateSubjectScore = (id: number, newScore: number) => {
-    setSubjects(prev => prev.map(s => {
-      if (s.id === id) {
-        // Simple grade logic for demo
-        let grade = 'F';
-        if (newScore >= 90) grade = 'O';
-        else if (newScore >= 80) grade = 'A+';
-        else if (newScore >= 70) grade = 'A';
-        else if (newScore >= 60) grade = 'B+';
-        else if (newScore >= 50) grade = 'B';
-        else if (newScore >= 40) grade = 'P';
+  const addTask = useCallback(async (task: Omit<Task, 'id'>) => {
+    const created = await tasksApi.create({
+      title: task.title,
+      subject: task.subject,
+      deadline: task.deadline.toISOString(),
+      progress: task.progress,
+      status: task.status,
+      type: task.type,
+    });
+    setTasks((prev) => [...prev, apiToTask(created)]);
+  }, []);
 
-        return { ...s, score: newScore, grade };
-      }
-      return s;
-    }));
-  };
+  const updateTask = useCallback(async (id: string, updates: Partial<Task>) => {
+    const payload: Record<string, unknown> = { ...updates };
+    if (updates.deadline instanceof Date) {
+      payload.deadline = updates.deadline.toISOString();
+    }
+    const updated = await tasksApi.update(id, payload as any);
+    setTasks((prev) => prev.map((t) => (t.id === id ? apiToTask(updated) : t)));
+  }, []);
 
-  const setSubjectsFromAPI = (newSubjects: Subject[]) => {
-    setSubjects(newSubjects);
-  };
+  const deleteTask = useCallback(async (id: string) => {
+    await tasksApi.delete(id);
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
-  const calculateCGPA = (customSubjects: Subject[] = subjects) => {
-    const totalCredits = customSubjects.reduce((acc, s) => acc + s.credits, 0);
-    const weightedScore = customSubjects.reduce((acc, s) => {
-      // Convert score to grade point (approximate)
-      const gradePoint = s.score / 10;
-      return acc + (gradePoint * s.credits);
-    }, 0);
+  // ── Subjects (local only) ─────────────────────────────────────────────────
 
-    return (weightedScore / totalCredits).toFixed(2);
-  };
+  const updateSubjectScore = useCallback((id: number, newScore: number) => {
+    setSubjectsState((prev) =>
+      prev.map((s) =>
+        s.id === id ? { ...s, score: newScore, grade: gradeFromScore(newScore) } : s
+      )
+    );
+  }, []);
+
+  const setSubjects = useCallback((newSubjects: Subject[]) => {
+    setSubjectsState(newSubjects);
+  }, []);
+
+  const calculateCGPA = useCallback(
+    (customSubjects: Subject[] = subjects) => {
+      const totalCredits = customSubjects.reduce((acc, s) => acc + s.credits, 0);
+      const weighted = customSubjects.reduce((acc, s) => acc + (s.score / 10) * s.credits, 0);
+      return (weighted / totalCredits).toFixed(2);
+    },
+    [subjects]
+  );
 
   return (
-    <DataContext.Provider value={{ tasks, subjects, addTask, updateTask, updateSubjectScore, setSubjects: setSubjectsFromAPI, calculateCGPA }}>
+    <DataContext.Provider
+      value={{
+        tasks,
+        subjects,
+        loading,
+        error,
+        addTask,
+        updateTask,
+        deleteTask,
+        updateSubjectScore,
+        setSubjects,
+        calculateCGPA,
+      }}
+    >
       {children}
     </DataContext.Provider>
   );
@@ -124,8 +168,6 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
 export function useData() {
   const context = useContext(DataContext);
-  if (context === undefined) {
-    throw new Error('useData must be used within a DataProvider');
-  }
+  if (!context) throw new Error('useData must be used within a DataProvider');
   return context;
 }
